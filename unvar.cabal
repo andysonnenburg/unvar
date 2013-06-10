@@ -1,0 +1,28 @@
+name:                unvar
+version:             0.1.0.0
+-- synopsis:            
+-- description:         
+homepage:            http://github.com/sonyandy/unvar
+license:             BSD3
+license-file:        LICENSE
+author:              Andy Sonnenburg
+maintainer:          Andy Sonnenburg <andy22286@gmail.com>
+-- copyright:           
+category:            Plugin
+build-type:          Simple
+cabal-version:       >= 1.8
+
+library
+  hs-source-dirs: src
+  exposed-modules: UnVar
+  other-modules: UnVar.Ann
+  build-depends: base >= 4 && < 5, ghc
+  other-extensions: DeriveDataTypeable
+  ghc-options: -Wall -fwarn-tabs
+
+test-suite simple
+  type: exitcode-stdio-1.0
+  hs-source-dirs: tests
+  main-is: simple.hs
+  build-depends: base, unvar
+  ghc-options: -Wall -fwarn-tabs -O2 -fplugin=UnVar
