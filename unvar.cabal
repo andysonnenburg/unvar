@@ -15,8 +15,10 @@ cabal-version:       >= 1.8
 library
   hs-source-dirs: src
   exposed-modules: UnVar
-  other-modules: UnVar.Ann
-  build-depends: base >= 4 && < 5, ghc
+  build-depends:
+    base >= 4 && < 5,
+    ghc,
+    transformers
   other-extensions: DeriveDataTypeable
   ghc-options: -Wall -fwarn-tabs
 
@@ -25,4 +27,4 @@ test-suite simple
   hs-source-dirs: tests
   main-is: simple.hs
   build-depends: base, unvar
-  ghc-options: -Wall -fwarn-tabs -O2 -fplugin=UnVar
+  ghc-options: -Wall -fwarn-tabs -O2 -ddump-prep -dcore-lint

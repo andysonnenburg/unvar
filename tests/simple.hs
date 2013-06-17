@@ -1,10 +1,8 @@
+{-# OPTIONS_GHC -fplugin=UnVar #-}
 module Main (main) where
 
 import Data.IORef
 
-import UnVar
-
-{-# ANN main UnVar #-}
 main :: IO ()
 main = do
   x <- newIORef False
