@@ -19,7 +19,7 @@ library
     base >= 4 && < 5,
     ghc,
     transformers
-  other-extensions: DeriveDataTypeable
+  other-extensions: DeriveDataTypeable, FlexibleInstances
   ghc-options: -Wall -fwarn-tabs
 
 test-suite simple
