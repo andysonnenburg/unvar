@@ -12,9 +12,12 @@ import Control.Applicative
 import Control.Monad
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
+import Control.Monad.Trans.State.Strict
+import Control.Monad.Trans.Writer.Strict
 
 import Data.Function (on)
-import Data.Maybe
+import Data.Maybe (fromMaybe)
+import Data.Monoid (Any (..))
 
 import GhcPlugins
 
@@ -29,69 +32,229 @@ install _ todo = do
 
 unVar :: ModGuts -> CoreM ModGuts
 unVar guts = do
-  printPpr $ mg_binds guts
-  binds <- runUnVarM $ mapM transformBind $ mg_binds guts
+  let binds = mg_binds guts
   printPpr binds
-  return guts { mg_binds = binds }
+  (_, deps, captured) <- runQueryM $ mapM queryBind binds
+  printPpr deps
+  printPpr captured
+  binds' <- runUnVarM $ mapM transformBind binds
+  printPpr binds'
+  return guts { mg_binds = binds' }
 
 printPpr :: Outputable a => a -> CoreM ()
 printPpr = putMsg . ppr
 
-type UnVarM = ReaderT (UniqFM Var) CoreM
-
 data MutVarDeps
-  = ClosesOver (UniqSet MutVarLabel) MutVarDeps
-  | PointsTo MutVarLabel
-  | Undefined
+  = ClosesOver (UniqSet CoreBndr) MutVarDeps
+  | PointsTo CoreBndr
+  | Undefined deriving Eq
 
-type MutVarLabel = Unique
+instance Outputable MutVarDeps where
+  ppr deps = case deps of
+    ClosesOver bndrs deps' ->
+      text "ClosesOver" <+> ppr bndrs <+> parens (ppr deps')
+    PointsTo bndr ->
+      text "PointsTo" <+> ppr bndr
+    Undefined ->
+      text "Undefined"
+
+type QueryM = StateT S CoreM
+
+data S = S { bndrMutVarDeps :: !(UniqFM MutVarDeps)
+           , capturedBndrs :: !(UniqSet CoreBndr)
+           }
+
+runQueryM :: QueryM a -> CoreM (a, UniqFM MutVarDeps, UniqSet CoreBndr)
+runQueryM m = do
+  (a, S deps captured) <- runStateT m (S emptyUFM emptyUniqSet)
+  return (a, deps, captured)
+
+queryExpr e = do
+  r@(deps, labels) <- queryExpr' e
+  lift $ do
+    putMsgS "XXX queryExpr XXX"
+    printPpr e
+    printPpr deps
+    printPpr labels
+  return r
+
+queryExpr' :: CoreExpr -> QueryM (MutVarDeps, UniqSet CoreBndr)
+queryExpr' expr = case expr of
+  Case (App (App (App (App (Var f) _) _) e1) _)
+    _ _ [(_, [_, x], e2)] | isNewMutVar f -> do
+    (deps1, bndrs1) <- queryExpr e1
+    abandonDepBndrs deps1
+    captureBndr x
+    putBndrDeps x $ PointsTo x
+    (deps2, bndrs2) <- queryExpr e2
+    when (x `memberOfDeps` deps2) $ abandonBndr x
+    return (deps2, delOneFromUniqSet (unionUniqSets bndrs1 bndrs2) x)
+  Case (App (App (App (App (Var f) _) _) (Var x)) _)
+    _ _ [(_, [_, _], e)] | isReadMutVar f -> do
+    bndrs <- depsToUniqSet <$> getBndrDeps x
+    (deps, bndrs') <- queryExpr e
+    return (deps, unionUniqSets bndrs bndrs')    
+  Case (App (App (App (App (App (Var f) _) _) (Var x)) e1) _)
+    _ _ [(DEFAULT, [], e2)] | isWriteMutVar f -> do
+    bndrs <- depsToUniqSet <$> getBndrDeps x
+    (deps1, bndrs1) <- queryExpr e1
+    abandonDepBndrs deps1
+    (deps2, bndrs2) <- queryExpr e2
+    return (deps2, unionManyUniqSets [bndrs, bndrs1, bndrs2])
+  Var x -> do
+    deps <- getBndrDeps x
+    return (deps, depsToUniqSet deps)
+  Lit _ ->
+    return (Undefined, emptyUniqSet)
+  App e1 e2 -> do
+    (deps1, bndrs1) <- queryExpr e1
+    (deps2, bndrs2)  <- queryExpr e2
+    abandonDepBndrs deps2
+    let (bndrs', deps') = unconsDeps deps1
+    return (deps', unionManyUniqSets [bndrs1, bndrs2, bndrs'])
+  Lam _ e -> do
+    (deps, bndrs) <- queryExpr e
+    return (ClosesOver bndrs deps, emptyUniqSet)
+  Let bind e -> do
+    bndrs <- queryBind bind
+    (deps, bndrs') <- queryExpr e
+    return (deps, unionUniqSets bndrs bndrs')
+  Case e x _ alts -> do
+    (deps, bndrs) <- queryExpr e
+    putBndrDeps x deps
+    (deps', bndrs') <- queryAlts alts
+    return (deps', unionManyUniqSets [depsToUniqSet deps, bndrs, bndrs'])
+  Cast e _ ->
+    queryExpr e
+  Tick _ e ->
+    queryExpr e
+  Type _ ->
+    return (Undefined, emptyUniqSet)
+  Coercion _ ->
+    return (Undefined, emptyUniqSet)
+
+queryBind :: CoreBind -> QueryM (UniqSet CoreBndr)
+queryBind bind = case bind of
+  NonRec x e -> do
+    (deps, bndrs) <- queryExpr e
+    putBndrDeps x deps
+    return bndrs
+  Rec binds -> do
+    mapM_ (flip putBndrDeps Undefined . fst) binds
+    fmap unionManyUniqSets $ runQueryRecM $ forM binds $ \ (x, e) -> do
+      (deps, bndrs) <- lift $ queryExpr e
+      putRecBndrDeps x deps
+      return bndrs
+
+type QueryRecM = WriterT Any QueryM
+
+runQueryRecM :: QueryRecM a -> QueryM a
+runQueryRecM m = do
+  (a, w) <- runWriterT m
+  if getAny w then runQueryRecM m else return a
+
+putRecBndrDeps :: CoreBndr -> MutVarDeps -> QueryRecM ()
+putRecBndrDeps x deps = do
+  deps' <- lift $ getBndrDeps x
+  when (deps /= deps') $ do
+    lift $ putBndrDeps x deps
+    tell $ Any True
+
+queryAlts :: [CoreAlt] -> QueryM (MutVarDeps, UniqSet CoreBndr)
+queryAlts alts = foldl1' f <$> mapM queryAlt alts
+  where
+    f (deps, bndrs) (deps', bndrs') =
+      (appendDeps deps deps', unionUniqSets bndrs bndrs')
+
+queryAlt :: CoreAlt -> QueryM (MutVarDeps, UniqSet CoreBndr)
+queryAlt (_, _, e) = queryExpr e
+
+getBndrDeps :: CoreBndr -> QueryM MutVarDeps
+getBndrDeps x = gets $ fromMaybe Undefined . flip lookupUFM x . bndrMutVarDeps
+
+putBndrDeps :: CoreBndr -> MutVarDeps -> QueryM ()
+putBndrDeps x deps = modify $ \ s@(S xs _) ->
+  s { bndrMutVarDeps = addToUFM xs x deps }
+
+captureBndr :: CoreBndr -> QueryM ()
+captureBndr bndr = modify $ \ s@(S _ xs) ->
+  s { capturedBndrs = addOneToUniqSet xs bndr }
+
+abandonDepBndrs :: MutVarDeps -> QueryM ()
+abandonDepBndrs deps = case deps of
+  ClosesOver bndrs deps' -> do
+    modify $ \ s@(S _ xs) -> s { capturedBndrs = xs `minusUniqSet` bndrs }
+    abandonDepBndrs deps'
+  PointsTo bndr ->
+    abandonBndr bndr
+  Undefined ->
+    return ()
+
+abandonBndr :: CoreBndr -> QueryM ()
+abandonBndr bndr = modify $ \ s@(S _ xs) ->
+  s { capturedBndrs = delOneFromUniqSet xs bndr }
+
+unconsDeps :: MutVarDeps -> (UniqSet CoreBndr, MutVarDeps)
+unconsDeps deps = case deps of
+  ClosesOver bndrs deps' -> (bndrs, deps')
+  PointsTo _ -> (emptyUniqSet, Undefined)
+  Undefined -> (emptyUniqSet, Undefined)
+
+memberOfDeps :: CoreBndr -> MutVarDeps -> Bool
+memberOfDeps bndr deps = case deps of
+  ClosesOver bndrs deps' ->
+    elementOfUniqSet bndr bndrs ||
+    memberOfDeps bndr deps'
+  PointsTo bndr' ->
+    bndr == bndr'
+  Undefined ->
+    False
+
+appendDeps :: MutVarDeps -> MutVarDeps -> MutVarDeps
+appendDeps x y = case (x, y) of
+  (ClosesOver as x', ClosesOver bs y') | as == bs -> ClosesOver as $ appendDeps x' y'
+  (PointsTo a, PointsTo b) | a == b -> x
+  _ -> Undefined
+
+depsToUniqSet :: MutVarDeps -> UniqSet CoreBndr
+depsToUniqSet deps = case deps of
+  ClosesOver _ _ -> emptyUniqSet
+  PointsTo bndr -> unitUniqSet bndr
+  Undefined -> emptyUniqSet
+
+type UnVarM = ReaderT (UniqFM Var) CoreM
 
 runUnVarM :: UnVarM a -> CoreM a
 runUnVarM = flip runReaderT emptyUFM
 
-queryExpr :: CoreExpr -> CoreM (UniqFM MutVarDeps, UniqSet MutVarLabel)
-queryExpr = undefined
-
 transformExpr :: CoreExpr -> UnVarM CoreExpr
 transformExpr expr = case expr of
   Case (App (App (App (App (Var f) (Type t)) _) e1) (Var s))
-    _ _ [(_, [s', x], e2)] | isNewMutVar f -> do
-    p <- canTransformBndr x
-    if p then
-      let x' = setVarType x t in
-      Let <$>
-      (NonRec x' <$> transformExpr e1) <*>
-      localBndr x x'
-      (join $
-       localBndr s' <$>
-       transformBndr s <*>
-       pure (transformExpr e2))
-      else transformExprDefault expr
+    _ _ [(_, [s', x], e2)] | isNewMutVar f ->
+    Let <$>
+    (NonRec x' <$> transformExpr e1) <*>
+    localBndr x x'
+    (join $
+     localBndr s' <$>
+     transformBndr s <*>
+     pure (transformExpr e2))
+    where
+      x' = setIdInfo (setVarType x t) vanillaIdInfo
   Case (App (App (App (App (Var f) _) _) (Var x)) (Var s))
-    _ _ [(_, [s', a], e)] | isReadMutVar f -> do
-    p <- canTransformBndr x
-    if p then
-      Let <$>
-      (NonRec a <$> (Var <$> transformBndr x)) <*>
-      join (localBndr s' <$> transformBndr s <*> pure (transformExpr e))
-      else transformExprDefault expr
+    _ _ [(_, [s', a], e)] | isReadMutVar f ->
+    Let <$>
+    (NonRec a <$> (Var <$> transformBndr x)) <*>
+    join (localBndr s' <$> transformBndr s <*> pure (transformExpr e))
   Case (App (App (App (App (App (Var f) _) _) (Var x)) e1) (Var s))
-    s' _ [(DEFAULT, [], e2)] | isWriteMutVar f -> do
-    p <- canTransformBndr x
-    if p then
-      setVarUnique <$> transformBndr x <*> lift getUniqueM >>= \ x' ->
-      Let <$>
-      (NonRec x' <$> transformExpr e1) <*>
-      localBndr x x'
-      (join $
-       localBndr s' <$>
-       transformBndr s <*>
-       pure (transformExpr e2))
-      else transformExprDefault expr
-  _ -> transformExprDefault expr
-
-transformExprDefault :: CoreExpr -> UnVarM CoreExpr
-transformExprDefault expr = case expr of
+    s' _ [(DEFAULT, [], e2)] | isWriteMutVar f ->
+    setVarUnique <$> transformBndr x <*> lift getUniqueM >>= \ x' ->
+    Let <$>
+    (NonRec x' <$> transformExpr e1) <*>
+    localBndr x x'
+    (join $
+     localBndr s' <$>
+     transformBndr s <*>
+     pure (transformExpr e2))
   Var x -> Var <$> transformBndr x
   Lit _ -> return expr
   App e1 e2 -> App <$> transformExpr e1 <*> transformExpr e2
