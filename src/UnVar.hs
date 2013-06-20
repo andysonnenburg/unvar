@@ -34,10 +34,8 @@ unVar :: ModGuts -> CoreM ModGuts
 unVar guts = do
   let binds = mg_binds guts
   printPpr binds
-  (_, deps, captured) <- runQueryM $ mapM queryBind binds
-  printPpr deps
-  printPpr captured
-  binds' <- runUnVarM $ mapM transformBind binds
+  (_, _, captured) <- runQueryM $ mapM queryBind binds
+  binds' <- runTransformM (mapM transformBind binds) captured
   printPpr binds'
   return guts { mg_binds = binds' }
 
@@ -47,21 +45,21 @@ printPpr = putMsg . ppr
 data MutVarDeps
   = ClosesOver (UniqSet CoreBndr) MutVarDeps
   | PointsTo CoreBndr
-  | Undefined deriving Eq
+  | None deriving Eq
 
 instance Outputable MutVarDeps where
   ppr deps = case deps of
     ClosesOver bndrs deps' ->
-      text "ClosesOver" <+> ppr bndrs <+> parens (ppr deps')
+      ptext (sLit "ClosesOver") <+> ppr bndrs <+> parens (ppr deps')
     PointsTo bndr ->
-      text "PointsTo" <+> ppr bndr
-    Undefined ->
-      text "Undefined"
+      ptext (sLit "PointsTo") <+> ppr bndr
+    None ->
+      ptext (sLit "None")
 
 type QueryM = StateT S CoreM
 
 data S = S { bndrMutVarDeps :: !(UniqFM MutVarDeps)
-           , capturedBndrs :: !(UniqSet CoreBndr)
+           , candidateBndrs :: !(UniqSet CoreBndr)
            }
 
 runQueryM :: QueryM a -> CoreM (a, UniqFM MutVarDeps, UniqSet CoreBndr)
@@ -105,7 +103,7 @@ queryExpr' expr = case expr of
     deps <- getBndrDeps x
     return (deps, depsToUniqSet deps)
   Lit _ ->
-    return (Undefined, emptyUniqSet)
+    return (None, emptyUniqSet)
   App e1 e2 -> do
     (deps1, bndrs1) <- queryExpr e1
     (deps2, bndrs2)  <- queryExpr e2
@@ -129,9 +127,9 @@ queryExpr' expr = case expr of
   Tick _ e ->
     queryExpr e
   Type _ ->
-    return (Undefined, emptyUniqSet)
+    return (None, emptyUniqSet)
   Coercion _ ->
-    return (Undefined, emptyUniqSet)
+    return (None, emptyUniqSet)
 
 queryBind :: CoreBind -> QueryM (UniqSet CoreBndr)
 queryBind bind = case bind of
@@ -140,7 +138,7 @@ queryBind bind = case bind of
     putBndrDeps x deps
     return bndrs
   Rec binds -> do
-    mapM_ (flip putBndrDeps Undefined . fst) binds
+    mapM_ (flip putBndrDeps None . fst) binds
     fmap unionManyUniqSets $ runQueryRecM $ forM binds $ \ (x, e) -> do
       (deps, bndrs) <- lift $ queryExpr e
       putRecBndrDeps x deps
@@ -161,16 +159,22 @@ putRecBndrDeps x deps = do
     tell $ Any True
 
 queryAlts :: [CoreAlt] -> QueryM (MutVarDeps, UniqSet CoreBndr)
-queryAlts alts = foldl1' f <$> mapM queryAlt alts
+queryAlts = foldlM1 f <=< mapM queryAlt
   where
     f (deps, bndrs) (deps', bndrs') =
-      (appendDeps deps deps', unionUniqSets bndrs bndrs')
+      (,) <$> unifyDeps deps deps' <*> pure (unionUniqSets bndrs bndrs')
+
+foldlM1 :: Monad m => (a -> a -> m a) -> [a] -> m a
+foldlM1 _ [] = error "foldlM1': empty structure"
+foldlM1 f (x0:xs) = foldr f' return xs x0
+  where
+    f' x k z = f z x >>= k
 
 queryAlt :: CoreAlt -> QueryM (MutVarDeps, UniqSet CoreBndr)
 queryAlt (_, _, e) = queryExpr e
 
 getBndrDeps :: CoreBndr -> QueryM MutVarDeps
-getBndrDeps x = gets $ fromMaybe Undefined . flip lookupUFM x . bndrMutVarDeps
+getBndrDeps x = gets $ fromMaybe None . flip lookupUFM x . bndrMutVarDeps
 
 putBndrDeps :: CoreBndr -> MutVarDeps -> QueryM ()
 putBndrDeps x deps = modify $ \ s@(S xs _) ->
@@ -178,27 +182,31 @@ putBndrDeps x deps = modify $ \ s@(S xs _) ->
 
 captureBndr :: CoreBndr -> QueryM ()
 captureBndr bndr = modify $ \ s@(S _ xs) ->
-  s { capturedBndrs = addOneToUniqSet xs bndr }
+  s { candidateBndrs = addOneToUniqSet xs bndr }
 
 abandonDepBndrs :: MutVarDeps -> QueryM ()
 abandonDepBndrs deps = case deps of
   ClosesOver bndrs deps' -> do
-    modify $ \ s@(S _ xs) -> s { capturedBndrs = xs `minusUniqSet` bndrs }
+    modify $ \ s@(S _ xs) -> s { candidateBndrs = xs `minusUniqSet` bndrs }
     abandonDepBndrs deps'
   PointsTo bndr ->
     abandonBndr bndr
-  Undefined ->
+  None ->
     return ()
 
 abandonBndr :: CoreBndr -> QueryM ()
 abandonBndr bndr = modify $ \ s@(S _ xs) ->
-  s { capturedBndrs = delOneFromUniqSet xs bndr }
+  s { candidateBndrs = delOneFromUniqSet xs bndr }
+
+abandonBndrs :: UniqSet CoreBndr -> QueryM ()
+abandonBndrs bndrs = modify $ \ s@(S _ xs) ->
+  s { candidateBndrs = xs `minusUniqSet` bndrs }
 
 unconsDeps :: MutVarDeps -> (UniqSet CoreBndr, MutVarDeps)
 unconsDeps deps = case deps of
   ClosesOver bndrs deps' -> (bndrs, deps')
-  PointsTo _ -> (emptyUniqSet, Undefined)
-  Undefined -> (emptyUniqSet, Undefined)
+  PointsTo _ -> (emptyUniqSet, None)
+  None -> (emptyUniqSet, None)
 
 memberOfDeps :: CoreBndr -> MutVarDeps -> Bool
 memberOfDeps bndr deps = case deps of
@@ -207,70 +215,84 @@ memberOfDeps bndr deps = case deps of
     memberOfDeps bndr deps'
   PointsTo bndr' ->
     bndr == bndr'
-  Undefined ->
+  None ->
     False
 
-appendDeps :: MutVarDeps -> MutVarDeps -> MutVarDeps
-appendDeps x y = case (x, y) of
-  (ClosesOver as x', ClosesOver bs y') | as == bs -> ClosesOver as $ appendDeps x' y'
-  (PointsTo a, PointsTo b) | a == b -> x
-  _ -> Undefined
+unifyDeps :: MutVarDeps -> MutVarDeps -> QueryM MutVarDeps
+unifyDeps x y = case (x, y) of
+  (ClosesOver as x', ClosesOver bs y') -> do
+    abandonBndrs $ unionUniqSets as bs `minusUniqSet` as'
+    ClosesOver as' <$> unifyDeps x' y'
+    where
+      as' = intersectUniqSets as bs
+  (PointsTo a, PointsTo b)
+    | a == b -> return x
+  _ -> do
+    abandonDepBndrs x
+    abandonDepBndrs y
+    return None
 
 depsToUniqSet :: MutVarDeps -> UniqSet CoreBndr
 depsToUniqSet deps = case deps of
   ClosesOver _ _ -> emptyUniqSet
   PointsTo bndr -> unitUniqSet bndr
-  Undefined -> emptyUniqSet
+  None -> emptyUniqSet
 
-type UnVarM = ReaderT (UniqFM Var) CoreM
+type TransformM = ReaderT R CoreM
 
-runUnVarM :: UnVarM a -> CoreM a
-runUnVarM = flip runReaderT emptyUFM
+data R = R { capturedBndrs :: UniqSet CoreBndr
+           , bndrSubst :: UniqFM CoreBndr
+           }
 
-transformExpr :: CoreExpr -> UnVarM CoreExpr
-transformExpr expr = case expr of
-  Case (App (App (App (App (Var f) (Type t)) _) e1) (Var s))
-    _ _ [(_, [s', x], e2)] | isNewMutVar f ->
-    Let <$>
-    (NonRec x' <$> transformExpr e1) <*>
-    localBndr x x'
-    (join $
-     localBndr s' <$>
-     transformBndr s <*>
-     pure (transformExpr e2))
-    where
-      x' = setIdInfo (setVarType x t) vanillaIdInfo
-  Case (App (App (App (App (Var f) _) _) (Var x)) (Var s))
-    _ _ [(_, [s', a], e)] | isReadMutVar f ->
-    Let <$>
-    (NonRec a <$> (Var <$> transformBndr x)) <*>
-    join (localBndr s' <$> transformBndr s <*> pure (transformExpr e))
-  Case (App (App (App (App (App (Var f) _) _) (Var x)) e1) (Var s))
-    s' _ [(DEFAULT, [], e2)] | isWriteMutVar f ->
-    setVarUnique <$> transformBndr x <*> lift getUniqueM >>= \ x' ->
-    Let <$>
-    (NonRec x' <$> transformExpr e1) <*>
-    localBndr x x'
-    (join $
-     localBndr s' <$>
-     transformBndr s <*>
-     pure (transformExpr e2))
-  Var x -> Var <$> transformBndr x
-  Lit _ -> return expr
-  App e1 e2 -> App <$> transformExpr e1 <*> transformExpr e2
-  Lam x e -> Lam <$> transformBndr x <*> transformExpr e
-  Let bind e -> Let <$> transformBind bind <*> transformExpr e
-  Case e x typ alts -> transformCase e x typ alts
-  Cast e coercion -> Cast <$> transformExpr e <*> pure coercion
-  Tick tick e -> Tick tick <$> transformExpr e
-  Type _ -> return expr
-  Coercion _ -> return expr
+runTransformM :: TransformM a -> UniqSet CoreBndr -> CoreM a
+runTransformM m captured = runReaderT m (R captured emptyUFM)
 
-transformCase :: CoreExpr -> Var -> Type -> [CoreAlt] -> UnVarM CoreExpr
+transformExpr :: CoreExpr -> TransformM CoreExpr
+transformExpr expr = do
+  captured <- asks capturedBndrs
+  case expr of
+    Case (App (App (App (App (Var f) (Type t)) _) e1) (Var s))
+      _ _ [(_, [s', x], e2)] | isNewMutVar f && elementOfUniqSet x captured ->
+      Let <$>
+      (NonRec x' <$> transformExpr e1) <*>
+      localBndr x x'
+      (join $
+       localBndr s' <$>
+       transformBndr s <*>
+       pure (transformExpr e2))
+      where
+        x' = setIdInfo (setVarType x t) vanillaIdInfo
+    Case (App (App (App (App (Var f) _) _) (Var x)) (Var s))
+      _ _ [(_, [s', a], e)] | isReadMutVar f && elementOfUniqSet x captured ->
+      Let <$>
+      (NonRec a <$> (Var <$> transformBndr x)) <*>
+      join (localBndr s' <$> transformBndr s <*> pure (transformExpr e))
+    Case (App (App (App (App (App (Var f) _) _) (Var x)) e1) (Var s))
+      s' _ [(DEFAULT, [], e2)] | isWriteMutVar f && elementOfUniqSet x captured ->
+      setVarUnique <$> transformBndr x <*> lift getUniqueM >>= \ x' ->
+      Let <$>
+      (NonRec x' <$> transformExpr e1) <*>
+      localBndr x x'
+      (join $
+       localBndr s' <$>
+       transformBndr s <*>
+       pure (transformExpr e2))
+    Var x -> Var <$> transformBndr x
+    Lit _ -> return expr
+    App e1 e2 -> App <$> transformExpr e1 <*> transformExpr e2
+    Lam x e -> Lam <$> transformBndr x <*> transformExpr e
+    Let bind e -> Let <$> transformBind bind <*> transformExpr e
+    Case e x typ alts -> transformCase e x typ alts
+    Cast e coercion -> Cast <$> transformExpr e <*> pure coercion
+    Tick tick e -> Tick tick <$> transformExpr e
+    Type _ -> return expr
+    Coercion _ -> return expr
+
+transformCase :: CoreExpr -> Var -> Type -> [CoreAlt] -> TransformM CoreExpr
 transformCase e x typ alts =
   Case <$> transformExpr e <*> pure x <*> pure typ <*> transformAlts alts
 
-transformBind :: CoreBind -> UnVarM CoreBind
+transformBind :: CoreBind -> TransformM CoreBind
 transformBind bind = case bind of
   NonRec bndr e -> NonRec <$> transformBndr bndr <*> transformExpr e
   Rec binds -> Rec <$> mapM transformTuple binds
@@ -278,20 +300,18 @@ transformBind bind = case bind of
       transformTuple (bndr, expr) =
         (,) <$> transformBndr bndr <*> transformExpr expr
 
-transformAlts :: [CoreAlt] -> UnVarM [CoreAlt]
+transformAlts :: [CoreAlt] -> TransformM [CoreAlt]
 transformAlts = mapM transformAlt
 
-transformAlt :: CoreAlt -> UnVarM CoreAlt
+transformAlt :: CoreAlt -> TransformM CoreAlt
 transformAlt (altCon, vars, expr) = (,,) altCon vars <$> transformExpr expr
 
-localBndr :: CoreBndr -> CoreBndr -> UnVarM a -> UnVarM a
-localBndr bndr bndr' = local (\ m -> addToUFM m bndr bndr')
+localBndr :: CoreBndr -> CoreBndr -> TransformM a -> TransformM a
+localBndr bndr bndr' = local $ \ r@(R _ subst) ->
+  r { bndrSubst = addToUFM subst bndr bndr' }
 
-transformBndr :: CoreBndr -> UnVarM CoreBndr
-transformBndr bndr = asks $ fromMaybe bndr . flip lookupUFM bndr
-
-canTransformBndr :: CoreBndr -> UnVarM Bool
-canTransformBndr _ = return True
+transformBndr :: CoreBndr -> TransformM CoreBndr
+transformBndr bndr = asks $ fromMaybe bndr . flip lookupUFM bndr . bndrSubst
 
 isNewMutVar :: NamedThing a => a -> Bool
 isNewMutVar =
