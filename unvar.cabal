@@ -15,11 +15,22 @@ cabal-version:       >= 1.8
 library
   hs-source-dirs: src
   exposed-modules: UnVar
+  other-modules:
+    Control.Monad.Trans.ST
+    Control.Monad.Trans.ST.Trail
+    Control.Monad.Unify.Atom
   build-depends:
     base >= 4 && < 5,
     ghc,
-    transformers
-  other-extensions: DeriveDataTypeable, FlexibleInstances
+    transformers,
+    logict,
+    var
+  other-extensions:
+    FlexibleInstances,
+    FunctionalDependencies,
+    MultiParamTypeClasses,
+    Rank2Types,
+    TypeFamilies
   ghc-options: -Wall -fwarn-tabs
 
 test-suite simple
