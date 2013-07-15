@@ -20,6 +20,7 @@ module Control.Monad.Unify
 
 import Control.Applicative
 import Control.Monad (MonadPlus, liftM)
+import Control.Monad.Fix (MonadFix)
 import Control.Monad.ST.Safe (ST)
 import qualified Control.Monad.ST.Lazy.Safe as Lazy
 import Control.Monad.Trans.Class
@@ -38,12 +39,12 @@ class IsVar var where
   default sameVar :: Eq (var a) => var a -> var a -> Bool
   sameVar = (==)
 
-class (IsVar var, Monad m) => MonadVar var m | m -> var where
+class (IsVar var, MonadFix m) => MonadVar var m | m -> var where
   freshVar :: m (var a)
 
   readVar :: var a -> m (Maybe a)
 
-  writeVar :: var a -> Maybe a -> m ()
+  writeVar :: var a -> a -> m ()
 
   default freshVar :: (MonadTrans t, MonadVar var m) => t m (var a)
   freshVar = lift freshVar
@@ -51,7 +52,7 @@ class (IsVar var, Monad m) => MonadVar var m | m -> var where
   default readVar :: (MonadTrans t, MonadVar var m) => var a -> t m (Maybe a)
   readVar = lift . readVar
 
-  default writeVar :: (MonadTrans t, MonadVar var m) => var a -> Maybe a -> t m ()
+  default writeVar :: (MonadTrans t, MonadVar var m) => var a -> a -> t m ()
   writeVar var = lift . writeVar var
 
 class MonadUnify var t | t -> var where
@@ -69,25 +70,26 @@ instance IsVar (WrappedVar (STVar s))
 instance MonadVar (WrappedVar (STVar s)) (ST s) where
   freshVar = WrapVar <$> newVar Nothing
   readVar = Var.readVar . unwrapVar
-  writeVar = Var.writeVar . unwrapVar
+  writeVar var = Var.writeVar (unwrapVar var) . Just
 
 instance MonadVar (WrappedVar (STVar s)) (Lazy.ST s) where
   freshVar = WrapVar <$> newVar Nothing
   readVar = Var.readVar . unwrapVar
-  writeVar = Var.writeVar . unwrapVar
+  writeVar var = Var.writeVar (unwrapVar var) . Just
 
 instance IsVar (WrappedVar IOVar)
 
 instance MonadVar (WrappedVar IOVar) IO where
   freshVar = WrapVar <$> newVar Nothing
   readVar = Var.readVar . unwrapVar
-  writeVar = Var.writeVar . unwrapVar
+  writeVar var = Var.writeVar (unwrapVar var) . Just
 
 instance IsVar (WrappedVar (STTVar s m))
 
 instance ( MonadST m
+         , MonadFix m
          , w ~ World m
          ) => MonadVar (WrappedVar (STTVar s w)) (STT s m) where
   freshVar = liftM WrapVar $ newVar Nothing
   readVar = Var.readVar . unwrapVar
-  writeVar = Var.writeVar . unwrapVar
+  writeVar var = Var.writeVar (unwrapVar var) . Just

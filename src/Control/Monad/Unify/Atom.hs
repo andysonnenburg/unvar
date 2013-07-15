@@ -7,81 +7,49 @@ Maintainer  :  andy22286@gmail.com
 module Control.Monad.Unify.Atom
        ( module Control.Monad.Unify
        , Term
-       , val
-       , freeze
-       , toTerm
-       , fromTerm
+       , atom
        , unify
        ) where
 
 import Control.Monad (MonadPlus (mzero), (>=>), liftM)
 import Control.Monad.Unify
 
-data Term var a = Val a | Var !(var (Term var a))
+data Term var a = Pure a | Wrap !(var (Term var a))
 
 instance Eq a => MonadUnify var (Term var a) where
-  fresh = liftM Var freshVar
-  x `is` y = do
-    _ <- unify (\ _ _ -> mzero) x y
-    return ()
+  fresh = liftM Wrap freshVar
+  x `is` y = unify (\ _ _ -> mzero) x y
 
-val :: a -> Term var a
-val = toTerm
-
-freeze :: (MonadVar var m, MonadPlus m) => Term var a -> m a
-freeze = fromTerm (\ _ -> mzero)
-
-toTerm :: a -> Term var a
-toTerm = Val
-
-fromTerm :: MonadVar var m => (var (Term var a) -> m a) -> Term var a -> m a
-fromTerm f = semiprune >=> \ x -> case x of
-  Pure a :* _ -> return a
-  UnwrittenVar v :* _ -> f v
-  WrittenVar _ a :* _ -> return a
+atom :: a -> Term var a
+atom = Pure
 
 unify :: (Eq a, MonadVar var m) =>
          (a -> a -> m ()) ->
-         Term var a -> Term var a -> m (Term var a)
+         Term var a -> Term var a -> m ()
 unify f t1 t2 = do
   x1 <- semiprune t1
   x2 <- semiprune t2
   case (x1, x2) of
     (UnwrittenVar v1 :* _, UnwrittenVar v2 :* t2')
-      | sameVar v1 v2 -> return t2'
-      | otherwise -> do
-        writeVar v1 $ Just t2'
-        return t2'
-    (UnwrittenVar v1 :* _, WrittenVar _ _ :* t2') -> do
-      writeVar v1 $ Just t2'
-      return t2'
-    (WrittenVar _ _ :* t1', UnwrittenVar v2 :* _) -> do
-      writeVar v2 $ Just t1'
-      return t1'
+      | sameVar v1 v2 -> return ()
+      | otherwise -> writeVar v1 t2'
+    (UnwrittenVar v1 :* _, WrittenVar _ _ :* t2') -> writeVar v1 t2'
+    (WrittenVar _ _ :* t1', UnwrittenVar v2 :* _) -> writeVar v2 t1'
     (WrittenVar v1 a1 :* _, WrittenVar v2 a2 :* t2')
-      | sameVar v1 v2 -> return t2'
+      | sameVar v1 v2 -> return ()
       | otherwise -> do
         match a1 a2
-        writeVar v2 $ Just $ val a1
-        writeVar v1 $ Just t2'
-        return t2'
-    (UnwrittenVar v1 :* t1', Pure _ :* t2') -> do
-      writeVar v1 $ Just t2'
-      return t1'
-    (Pure _ :* t1', UnwrittenVar v2 :* t2') -> do
-      writeVar v2 $ Just t1'
-      return t2'
-    (WrittenVar v1 a1 :* t1', Pure a2 :* t2') -> do
+        writeVar v2 $ atom a1
+        writeVar v1 t2'
+    (UnwrittenVar v1 :* t1', Atom _ :* t2') -> writeVar v1 t2'
+    (Atom _ :* t1', UnwrittenVar v2 :* t2') -> writeVar v2 t1'
+    (WrittenVar v1 a1 :* t1', Atom a2 :* t2') -> do
       match a1 a2
-      writeVar v1 $ Just t2'
-      return t1'
-    (Pure a1 :* t1', WrittenVar v2 a2 :* t2') -> do
+      writeVar v1 t2'
+    (Atom a1 :* t1', WrittenVar v2 a2 :* t2') -> do
       match a1 a2
-      writeVar v2 $ Just t1'
-      return t2'
-    (Pure a :* t1', Pure b :* _) -> do
-      match a b
-      return t1'
+      writeVar v2 t1'
+    (Atom a :* t1', Atom b :* _) -> match a b
   where
     match a b
       | a == b = return ()
@@ -89,22 +57,22 @@ unify f t1 t2 = do
 
 semiprune :: MonadVar var m => Term var a -> m (Pair (Semipruned var a) (Term var a))
 semiprune t0 = case t0 of
-  Val a -> return $! Pure a :* t0
-  Var v -> go t0 v
+  Pure a -> return $! Atom a :* t0
+  Wrap var -> go t0 var
   where
-    go t v = do
-      r <- readVar v
+    go t var = do
+      r <- readVar var
       case r of
-        Nothing -> return $! UnwrittenVar v :* t
-        Just t'@(Var v') -> do
-          x@(_ :* t'') <- go t' v'
-          writeVar v $ Just t''
+        Nothing -> return $! UnwrittenVar var :* t
+        Just t'@(Wrap var') -> do
+          x@(_ :* t'') <- go t' var'
+          writeVar var t''
           return x
-        Just (Val a) -> return $! WrittenVar v a :* t
+        Just (Pure a) -> return $! WrittenVar var a :* t
 
 data Pair a b = !a :* !b
 
 data Semipruned var a
-  = Pure a
+  = Atom a
   | UnwrittenVar !(var (Term var a))
   | WrittenVar !(var (Term var a)) a

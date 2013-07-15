@@ -21,6 +21,7 @@ module Control.Monad.Trans.ST.Trail
 import Control.Applicative
 import Control.Monad.IO.Class
 import Control.Monad.Logic
+import Control.Monad.Fix (MonadFix (mfix))
 import Control.Monad.ST.Safe
 import Control.Monad.ST.Lazy.Safe (strictToLazyST)
 import qualified Control.Monad.ST.Lazy.Safe as Lazy
@@ -86,6 +87,9 @@ instance MonadST m => MonadST (STT s m) where
 instance (MonadST m, MonadPlus m) => MonadPlus (STT s m) where
   mzero = STT mzero
   m `mplus` n = STT $ unSTT (pushLabel >> m) `mplus` unSTT (popLabel >> n)
+
+instance MonadFix m => MonadFix (STT s m) where
+  mfix f = STT $ mfix (unSTT . f)
 
 instance MonadTrans (STT s) where
   lift = STT . lift
