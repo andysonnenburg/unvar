@@ -12,6 +12,7 @@ Maintainer  :  andy22286@gmail.com
 -}
 module Control.Monad.Trans.ST.Trail
        ( MonadST (..)
+       , RealWorld
        , STT
        , runSTT
        , STTVar
@@ -58,7 +59,7 @@ instance MonadST m => MonadST (LogicT m) where
   type World (LogicT m) = World m
 
 newtype STT s m a =
-  STT { unSTT :: ReaderT (Env m) m a
+  STT { unSTT :: ReaderT (Env s (World m)) m a
       }
 
 instance Functor m => Functor (STT s m) where
@@ -70,7 +71,7 @@ instance Applicative m => Applicative (STT s m) where
 
 instance (MonadST m, Alternative m) => Alternative (STT s m) where
   empty = STT empty
-  m <|> n = STT $ unSTT (label *> m) <|> unSTT (backtrack *> n)
+  m <|> n = STT $ unSTT (pushLabel *> m) <|> unSTT (popLabel *> n)
 
 instance Monad m => Monad (STT s m) where
   return = STT . return
@@ -84,7 +85,7 @@ instance MonadST m => MonadST (STT s m) where
 
 instance (MonadST m, MonadPlus m) => MonadPlus (STT s m) where
   mzero = STT mzero
-  m `mplus` n = STT $ unSTT (label >> m) `mplus` unSTT (backtrack >> n)
+  m `mplus` n = STT $ unSTT (pushLabel >> m) `mplus` unSTT (popLabel >> n)
 
 instance MonadTrans (STT s) where
   lift = STT . lift
@@ -92,68 +93,75 @@ instance MonadTrans (STT s) where
 instance MonadIO m => MonadIO (STT s m) where
   liftIO = STT . liftIO
 
-label :: MonadST m => STT s m ()
-label = STT $ do
+pushLabel :: MonadST m => STT s m ()
+pushLabel = STT $ do
   Env labelVar trailVar <- ask
   liftST $ do
     modifyVar' labelVar (+ 1)
     modifyVar' trailVar Label
 
-backtrack :: MonadST m => STT s m ()
-backtrack = STT $ do
+popLabel :: MonadST m => STT s m ()
+popLabel = STT $ do
   Env labelVar trailVar <- ask
   liftST $ do
     modifyVar' labelVar $ subtract 1
     writeVar trailVar =<< go =<< readVar trailVar
   where
-    go :: Trail m -> ST (World m) (Trail m)
-    go (Write var l a xs) = do
-      writeVar var $! Value l a
+    go :: Trail s w -> ST w (Trail s w)
+    go (Write labelVar var label a xs) = do
+      writeVar labelVar label
+      writeVar var a
       go xs
-    go (Label xs) =
-      return xs
-    go Nil =
-      return Nil
+    go (Label xs) = return xs
+    go Nil = return Nil
 
 runSTT :: MonadST m => (forall s . STT s m a) -> m a
 runSTT m = do
   r <- liftST $ Env <$> newVar minBound <*> newVar Nil
   runReaderT (unSTT m) r
 
-newtype STTVar s m a =
-  STTVar { unSTTVar :: STVar (World m) (Value a)
-         } deriving Eq
+data STTVar s w a =
+  STTVar
+  {-# UNPACK #-} !(STUVar w (Label s))
+  {-# UNPACK #-} !(STVar w a) deriving Eq
 
-instance MonadST m => Var (STTVar s m) a (STT s m) where
+instance (MonadST m, w ~ World m) => Var (STTVar s w) a (STT s m) where
   newVar a = STT $ do
-    Env labelVar _ <- ask
-    liftST $ fmap STTVar . newVar =<< Value <$> readVar labelVar <*> pure a
-  readVar var = liftST $ do
-    Value _ a <- readVar $ unSTTVar var
-    return a
-  writeVar (STTVar var) a = STT $ do
-    Env labelVar trailVar <- ask
+    env <- ask
     liftST $ do
-      l <- readVar labelVar
-      Value l' a' <- liftST $ readVar var
-      when (l' < l) $ modifyVar' trailVar $ Write var l' a'
-      writeVar var $! Value l a
+      label <- readLabel env
+      STTVar <$> newVar label <*> newVar a
+  readVar (STTVar _ var) = liftST $ readVar var
+  writeVar (STTVar labelVar var) a = STT $ do
+    env <- ask
+    liftST $ do
+      label <- readLabel env
+      label' <- readVar labelVar
+      when (label' /= label) $ do
+        modifyTrail' env . Write labelVar var label' =<< readVar var
+        writeVar labelVar label
+      writeVar var a
 
-data Env m =
+data Env s w =
   Env
-  {-# UNPACK #-} !(STUVar (World m) Label)
-  {-# UNPACK #-} !(STVar (World m) (Trail m))
+  {-# UNPACK #-} !(STUVar w (Label s))
+  {-# UNPACK #-} !(STVar w (Trail s w))
 
-data Trail m
+readLabel :: Env s w -> ST w (Label s)
+readLabel (Env labelVar _) = readVar labelVar
+
+modifyTrail' :: Env s w -> (Trail s w -> Trail s w) -> ST w ()
+modifyTrail' (Env _ trailVar) = modifyVar' trailVar
+
+data Trail s w
   = forall a .
     Write
-    {-# UNPACK #-} !(STVar (World m) (Value a))
-    {-# UNPACK #-} !Label
+    {-# UNPACK #-} !(STUVar w (Label s))
+    {-# UNPACK #-} !(STVar w a)
+    {-# UNPACK #-} !(Label s)
     a
-    !(Trail m)
-  | Label !(Trail m)
+    !(Trail s w)
+  | Label !(Trail s w)
   | Nil
 
-data Value a = Value {-# UNPACK #-} !Label a
-
-type Label = Int
+type Label s = Int

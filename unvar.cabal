@@ -18,7 +18,9 @@ library
   other-modules:
     Control.Monad.Trans.ST
     Control.Monad.Trans.ST.Trail
+    Control.Monad.Unify
     Control.Monad.Unify.Atom
+    Control.Monad.Unify.Bool
   build-depends:
     base >= 4 && < 5,
     ghc,
