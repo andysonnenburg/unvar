@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, PatternGuards #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
 {- |
 Copyright   :  (c) Andy Sonnenburg 2013
 License     :  BSD3
@@ -15,7 +15,7 @@ module Control.Monad.Unify.Bool
        , unify
        ) where
 
-import Control.Monad (MonadPlus, guard, liftM, liftM2, mzero, when)
+import Control.Monad (MonadPlus, (>=>), liftM, liftM2, mzero, when)
 import Control.Monad.Fix (mfix)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (evalStateT, get, modify)
@@ -81,22 +81,28 @@ unify m p q = do
   whenM (always cc) m
 
 semiprune :: MonadVar var m => Term var -> m (Term var)
-semiprune t0@(Var var0) = fix (\ rec t var ->
-  readVar var >>= maybe (return t) (\ t' -> case t' of
-    Var var' -> do
-      t'' <- rec t' var'
-      writeVar var t''
-      return t''
-    _ -> return t)) t0 var0
-semiprune t0 = return t0
+semiprune t = case t of
+  Var var -> readVar var >>= maybe (return t) (semiprune >=> \ t' -> do
+    writeVar var t'
+    case t' of
+      Var _ -> return t'
+      True -> return t'
+      False -> return t'
+      _ -> return t)
+  True -> return True
+  False -> return False
+  Not t' -> liftM not $ semiprune t'
+  p :&& q -> liftM2 (/\) (semiprune p) (semiprune q)
+  p :|| q -> liftM2 (\/) (semiprune p) (semiprune q)
 
 freeVars :: MonadVar var m => Term var -> m [var (Term var)]
 freeVars = liftM (keys . filter snd) . robin [] (fix $ \ rec t xs -> case t of
   Var x
     | any (sameVar x . fst) xs -> return xs
-    | otherwise -> readVar x >>= \ m -> case m of
-      Nothing -> return $ (x, Prelude.True):xs
-      Just t' -> rec t' $ (x, Prelude.False):xs
+    | otherwise ->
+      readVar x >>=
+      maybe (return $ (x, Prelude.True):xs) (\ t' ->
+        rec t' $ (x, Prelude.False):xs)
   True -> return xs
   False -> return xs
   Not t' -> rec t' xs
@@ -120,13 +126,12 @@ unify0 t (x:xs) = do
 
 (~>) :: MonadVar var m => var (Term var) -> Term var -> Term var -> m (Term var)
 x ~> a = flip evalStateT [(x, a)] . fix (\ rec t -> get >>= \ xs -> case t of
-  Var x'
-    | Just t' <- lookupBy (sameVar x') xs -> return t'
-    | otherwise -> lift (readVar x') >>= \ m -> case m of
-      Nothing -> return t
-      Just t' -> mfix $ \ t'' -> do
+  Var x' ->
+    whenNothing (lookupBy (sameVar x') xs) $
+    lift (readVar x') >>= maybe (return t) (\ t' ->
+      mfix $ \ t'' -> do
         modify ((x', t''):)
-        rec t'
+        rec t')
   True -> return True
   False -> return False
   Not t' -> liftM not $ rec t'
@@ -135,6 +140,9 @@ x ~> a = flip evalStateT [(x, a)] . fix (\ rec t -> get >>= \ xs -> case t of
 
 lookupBy :: (a -> Bool) -> [(a, b)] -> Maybe b
 lookupBy f = fmap snd . find (f . fst)
+
+whenNothing :: Monad m => Maybe a -> m a -> m a
+whenNothing p m = maybe m return p
 
 always :: MonadVar var m => Term var -> m Bool
 always t = do
