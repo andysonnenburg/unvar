@@ -108,12 +108,6 @@ freeVars = liftM (keys . filter snd) . robin [] (fix $ \ rec t xs -> case t of
   p :&& q -> rec p =<< rec q xs
   p :|| q -> rec p =<< rec q xs)
 
-keys :: [(a, b)] -> [a]
-keys = map fst
-
-robin :: a -> (b -> a -> c) -> b -> c
-robin x f y = f y x
-
 unify0 :: MonadVar var m => Term var -> [var (Term var)] -> m (Term var)
 unify0 t [] = return t
 unify0 t (x:xs) = do
@@ -137,19 +131,12 @@ x ~> a = flip evalStateT [(x, a)] . fix (\ rec t -> get >>= \ xs -> case t of
   p :&& q -> liftM2 (/\) (rec p) (rec q)
   p :|| q -> liftM2 (\/) (rec p) (rec q))
 
-lookupBy :: (a -> Bool) -> [(a, b)] -> Maybe b
-lookupBy f = fmap snd . find (f . fst)
-
-whenNothing :: Monad m => Maybe a -> m a -> m a
-whenNothing p m = maybe m return p
-
 always :: MonadVar var m => Term var -> m Bool
 always t = do
   p <- eval t
   return $! case p of
     T -> Prelude.True
-    I -> Prelude.False
-    F -> Prelude.False
+    _ -> Prelude.False
 
 eval :: MonadVar var m => Term var -> m Kleene
 eval t = case t of
@@ -208,3 +195,15 @@ p <+> q = (p \/ q) /\ not (p /\ q)
 
 whenM :: Monad m => m Bool -> m () -> m ()
 whenM m n = m >>= flip when n
+
+whenNothing :: Monad m => Maybe a -> m a -> m a
+whenNothing p m = maybe m return p
+
+lookupBy :: (a -> Bool) -> [(a, b)] -> Maybe b
+lookupBy f = fmap snd . find (f . fst)
+
+keys :: [(a, b)] -> [a]
+keys = map fst
+
+robin :: a -> (b -> a -> c) -> b -> c
+robin x f y = f y x
