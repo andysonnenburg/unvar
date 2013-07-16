@@ -26,13 +26,17 @@ library
     ghc,
     transformers,
     logict,
+    tagged,
     var
   other-extensions:
+    FlexibleContexts,
     FlexibleInstances,
     FunctionalDependencies,
     MultiParamTypeClasses,
     Rank2Types,
-    TypeFamilies
+    StandaloneDeriving,
+    TypeFamilies,
+    UndecidableInstances
   ghc-options: -Wall -fwarn-tabs
 
 test-suite simple

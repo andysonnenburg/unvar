@@ -1,4 +1,9 @@
-{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE
+    FlexibleContexts
+  , FlexibleInstances
+  , MultiParamTypeClasses
+  , StandaloneDeriving
+  , UndecidableInstances #-}
 {- |
 Copyright   :  (c) Andy Sonnenburg 2013
 License     :  BSD3
@@ -13,6 +18,7 @@ module Control.Monad.Unify.Bool
        , (/\)
        , (\/)
        , unify
+       , proxyTerm
        ) where
 
 import Control.Monad (MonadPlus, (>=>), liftM, liftM2, mzero, when)
@@ -22,6 +28,7 @@ import Control.Monad.Unify
 
 import Data.Function (fix)
 import Data.List (find)
+import Data.Proxy (Proxy (Proxy))
 
 import Prelude hiding (Bool (..), not)
 import Prelude (Bool)
@@ -37,6 +44,17 @@ data Term var
   | Not !(Term var)
   | !(Term var) :&& !(Term var)
   | !(Term var) :|| !(Term var)
+
+deriving instance Show (var (Term var)) => Show (Term var)
+
+proxyTerm :: Term var -> Term Proxy
+proxyTerm = fix $ \ rec t -> case t of
+  Var _ -> Var Proxy
+  True -> True
+  False -> False
+  Not t' -> Not (rec t')
+  p :&& q -> rec p :&& rec q
+  p :|| q -> rec p :|| rec q
 
 instance MonadUnify var (Term var) where
   fresh = liftM Var freshVar
@@ -80,8 +98,8 @@ unify m p q = do
   whenM (always cc) m
 
 semiprune :: MonadVar var m => Term var -> m (Term var)
-semiprune t = case t of
-  Var var -> readVar var >>= maybe (return t) (semiprune >=> \ t' -> do
+semiprune = fix $ \ rec t -> case t of
+  Var var -> readVar var >>= maybe (return t) (rec >=> \ t' -> do
     writeVar var t'
     case t' of
       Var _ -> return t'
@@ -90,17 +108,15 @@ semiprune t = case t of
       _ -> return t)
   True -> return True
   False -> return False
-  Not t' -> liftM not $ semiprune t'
-  p :&& q -> liftM2 (/\) (semiprune p) (semiprune q)
-  p :|| q -> liftM2 (\/) (semiprune p) (semiprune q)
+  Not t' -> liftM not (rec t')
+  p :&& q -> liftM2 (/\) (rec p) (rec q)
+  p :|| q -> liftM2 (\/) (rec p) (rec q)
 
 freeVars :: MonadVar var m => Term var -> m [var (Term var)]
 freeVars = liftM (keys . filter snd) . robin [] (fix $ \ rec t xs -> case t of
   Var x
     | any (sameVar x . fst) xs -> return xs
-    | otherwise ->
-      readVar x >>=
-      maybe (return $ (x, Prelude.True):xs) (\ t' ->
+    | otherwise -> readVar x >>= maybe (return $ (x, Prelude.True):xs) (\ t' ->
         rec t' $ (x, Prelude.False):xs)
   True -> return xs
   False -> return xs
@@ -127,7 +143,7 @@ x ~> a = flip evalStateT [(x, a)] . fix (\ rec t -> get >>= \ xs -> case t of
       return t'')
   True -> return True
   False -> return False
-  Not t' -> liftM not $ rec t'
+  Not t' -> liftM not (rec t')
   p :&& q -> liftM2 (/\) (rec p) (rec q)
   p :|| q -> liftM2 (\/) (rec p) (rec q))
 
@@ -139,9 +155,9 @@ always t = do
     _ -> Prelude.False
 
 eval :: MonadVar var m => Term var -> m Kleene
-eval t = case t of
+eval = fix $ \ rec t -> case t of
   Var x -> readVar x >>= maybe (return I) (\ t' -> do
-    p <- eval t'
+    p <- rec t'
     case p of
       T -> do
         writeVar x True
@@ -152,9 +168,9 @@ eval t = case t of
         return F)
   True -> return T
   False -> return F
-  Not t' -> notM $ eval t'
-  p :&& q -> eval p `andM` eval q
-  p :|| q -> eval p `orM` eval q
+  Not t' -> notM $ rec t'
+  p :&& q -> rec p `andM` rec q
+  p :|| q -> rec p `orM` rec q
 
 data Kleene = T | I | F
 
