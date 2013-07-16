@@ -11,8 +11,10 @@ module Control.Monad.Unify.Atom
        , unify
        ) where
 
-import Control.Monad (MonadPlus (mzero), liftM)
+import Control.Monad (MonadPlus, liftM, mzero)
 import Control.Monad.Unify
+
+import Data.Function (fix)
 
 data Term var a = Pure a | Wrap !(var (Term var a))
 
@@ -27,9 +29,9 @@ unify :: (Eq a, MonadVar var m) =>
          (a -> a -> m ()) ->
          Term var a -> Term var a -> m ()
 unify f t1 t2 = do
-  x1 <- semiprune t1
-  x2 <- semiprune t2
-  case (x1, x2) of
+  s1 <- semiprune t1
+  s2 <- semiprune t2
+  case (s1, s2) of
     (UnwrittenVar var1 :* _, UnwrittenVar var2 :* t2')
       | sameVar var1 var2 -> return ()
       | otherwise -> writeVar var1 t2'
@@ -55,24 +57,23 @@ unify f t1 t2 = do
       | a == b = return ()
       | otherwise = f a b
 
-semiprune :: MonadVar var m => Term var a -> m (Pair (Semipruned var a) (Term var a))
+semiprune :: MonadVar var m =>
+             Term var a -> m (Pair (SemiprunedTerm var a) (Term var a))
 semiprune t0 = case t0 of
   Pure a -> return $! Atom a :* t0
-  Wrap var -> go t0 var
-  where
-    go t var = do
-      m <- readVar var
-      case m of
-        Nothing -> return $! UnwrittenVar var :* t
-        Just t'@(Wrap var') -> do
-          x@(_ :* t'') <- go t' var'
-          writeVar var t''
-          return x
-        Just (Pure a) -> return $! WrittenVar var a :* t
+  Wrap var0 -> fix (\ rec t var -> do
+    m <- readVar var
+    case m of
+      Nothing -> return $! UnwrittenVar var :* t
+      Just t'@(Wrap var') -> do
+        s@(_ :* t'') <- rec t' var'
+        writeVar var t''
+        return s
+      Just (Pure a) -> return $! WrittenVar var a :* t) t0 var0
 
 data Pair a b = !a :* !b
 
-data Semipruned var a
+data SemiprunedTerm var a
   = Atom a
   | UnwrittenVar !(var (Term var a))
   | WrittenVar !(var (Term var a)) a

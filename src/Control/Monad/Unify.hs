@@ -12,7 +12,7 @@ License     :  BSD3
 Maintainer  :  andy22286@gmail.com
 -}
 module Control.Monad.Unify
-       ( IsVar (..)
+       ( Var (..)
        , MonadVar (..)
        , WrappedVar (..)
        , MonadUnify (..)
@@ -32,13 +32,13 @@ import Data.Var.ST (STVar)
 
 infix 4 `is`
 
-class IsVar var where
+class Var var where
   sameVar :: var a -> var a -> Bool
 
   default sameVar :: Eq (var a) => var a -> var a -> Bool
   sameVar = (==)
 
-class (IsVar var, Monad m) => MonadVar var m | m -> var where
+class (Var var, Monad m) => MonadVar var m | m -> var where
   freshVar :: m (var a)
 
   readVar :: var a -> m (Maybe a)
@@ -64,7 +64,7 @@ newtype WrappedVar var a =
 
 deriving instance Eq (var (Maybe a)) => Eq (WrappedVar var a)
 
-instance IsVar (WrappedVar (STVar s))
+instance Var (WrappedVar (STVar s))
 
 instance MonadVar (WrappedVar (STVar s)) (ST s) where
   freshVar = WrapVar <$> newVar Nothing
@@ -76,14 +76,14 @@ instance MonadVar (WrappedVar (STVar s)) (Lazy.ST s) where
   readVar = Var.readVar . unwrapVar
   writeVar var = Var.writeVar (unwrapVar var) . Just
 
-instance IsVar (WrappedVar IOVar)
+instance Var (WrappedVar IOVar)
 
 instance MonadVar (WrappedVar IOVar) IO where
   freshVar = WrapVar <$> newVar Nothing
   readVar = Var.readVar . unwrapVar
   writeVar var = Var.writeVar (unwrapVar var) . Just
 
-instance IsVar (WrappedVar (STTVar s m))
+instance Var (WrappedVar (STTVar s m))
 
 instance ( MonadST m
          , w ~ World m

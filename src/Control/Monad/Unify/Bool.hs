@@ -99,7 +99,7 @@ unify m p q = do
 
 semiprune :: MonadVar var m => Term var -> m (Term var)
 semiprune = fix $ \ rec t -> case t of
-  Var var -> readVar var >>= maybe (return t) (rec >=> \ t' -> do
+  Var var -> readVar var >>= return t `maybe` (rec >=> \ t' -> do
     writeVar var t'
     case t' of
       Var _ -> return t'
@@ -113,16 +113,15 @@ semiprune = fix $ \ rec t -> case t of
   p :|| q -> liftM2 (\/) (rec p) (rec q)
 
 freeVars :: MonadVar var m => Term var -> m [var (Term var)]
-freeVars = liftM (keys . filter snd) . robin [] (fix $ \ rec t xs -> case t of
-  Var x
-    | any (sameVar x . fst) xs -> return xs
-    | otherwise -> readVar x >>= maybe (return $ (x, Prelude.True):xs) (\ t' ->
-        rec t' $ (x, Prelude.False):xs)
-  True -> return xs
-  False -> return xs
-  Not t' -> rec t' xs
-  p :&& q -> rec p =<< rec q xs
-  p :|| q -> rec p =<< rec q xs)
+freeVars = liftM (keys . filter snd) . ($ []) . fix (\ rec t -> case t of
+  Var x -> \ xs -> if any (sameVar x . fst) xs then return xs else
+    readVar x >>= return ((x, Prelude.True):xs) `maybe` \ t' ->
+      rec t' ((x, Prelude.False):xs)
+  True -> return
+  False -> return
+  Not t' -> rec t'
+  p :&& q -> rec p >=> rec q
+  p :|| q -> rec p >=> rec q)
 
 unify0 :: MonadVar var m => Term var -> [var (Term var)] -> m (Term var)
 unify0 t [] = return t
@@ -135,12 +134,11 @@ unify0 t (x:xs) = do
 
 (~>) :: MonadVar var m => var (Term var) -> Term var -> Term var -> m (Term var)
 x ~> a = flip evalStateT [(x, a)] . fix (\ rec t -> get >>= \ xs -> case t of
-  Var x' ->
-    whenNothing (lookupBy (sameVar x') xs) $
-    lift (readVar x') >>= maybe (return t) (\ t' -> do
+  Var x' -> whenNothing (lookupBy (sameVar x') xs) $
+    lift (readVar x') >>= return t `maybe` \ t' -> do
       t'' <- rec t'
       modify ((x', t''):)
-      return t'')
+      return t''
   True -> return True
   False -> return False
   Not t' -> liftM not (rec t')
@@ -156,7 +154,7 @@ always t = do
 
 eval :: MonadVar var m => Term var -> m Kleene
 eval = fix $ \ rec t -> case t of
-  Var x -> readVar x >>= maybe (return I) (\ t' -> do
+  Var x -> readVar x >>= return I `maybe` \ t' -> do
     p <- rec t'
     case p of
       T -> do
@@ -165,7 +163,7 @@ eval = fix $ \ rec t -> case t of
       I -> return I
       F -> do
         writeVar x False
-        return F)
+        return F
   True -> return T
   False -> return F
   Not t' -> notM $ rec t'
@@ -220,6 +218,3 @@ lookupBy f = fmap snd . find (f . fst)
 
 keys :: [(a, b)] -> [a]
 keys = map fst
-
-robin :: a -> (b -> a -> c) -> b -> c
-robin x f y = f y x
