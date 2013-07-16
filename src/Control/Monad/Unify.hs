@@ -20,7 +20,6 @@ module Control.Monad.Unify
 
 import Control.Applicative
 import Control.Monad (MonadPlus, liftM)
-import Control.Monad.Fix (MonadFix)
 import Control.Monad.ST.Safe (ST)
 import qualified Control.Monad.ST.Lazy.Safe as Lazy
 import Control.Monad.Trans.Class
@@ -39,7 +38,7 @@ class IsVar var where
   default sameVar :: Eq (var a) => var a -> var a -> Bool
   sameVar = (==)
 
-class (IsVar var, MonadFix m) => MonadVar var m | m -> var where
+class (IsVar var, Monad m) => MonadVar var m | m -> var where
   freshVar :: m (var a)
 
   readVar :: var a -> m (Maybe a)
@@ -87,7 +86,6 @@ instance MonadVar (WrappedVar IOVar) IO where
 instance IsVar (WrappedVar (STTVar s m))
 
 instance ( MonadST m
-         , MonadFix m
          , w ~ World m
          ) => MonadVar (WrappedVar (STTVar s w)) (STT s m) where
   freshVar = liftM WrapVar $ newVar Nothing

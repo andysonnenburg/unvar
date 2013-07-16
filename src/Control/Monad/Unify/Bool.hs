@@ -16,7 +16,6 @@ module Control.Monad.Unify.Bool
        ) where
 
 import Control.Monad (MonadPlus, (>=>), liftM, liftM2, mzero, when)
-import Control.Monad.Fix (mfix)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (evalStateT, get, modify)
 import Control.Monad.Unify
@@ -128,10 +127,10 @@ unify0 t (x:xs) = do
 x ~> a = flip evalStateT [(x, a)] . fix (\ rec t -> get >>= \ xs -> case t of
   Var x' ->
     whenNothing (lookupBy (sameVar x') xs) $
-    lift (readVar x') >>= maybe (return t) (\ t' ->
-      mfix $ \ t'' -> do
-        modify ((x', t''):)
-        rec t')
+    lift (readVar x') >>= maybe (return t) (\ t' -> do
+      t'' <- rec t'
+      modify ((x', t''):)
+      return t'')
   True -> return True
   False -> return False
   Not t' -> liftM not $ rec t'
