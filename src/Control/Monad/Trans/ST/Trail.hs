@@ -28,6 +28,7 @@ import qualified Control.Monad.ST.Lazy.Safe as Lazy
 import Control.Monad.Trans.Maybe
 import Control.Monad.Trans.Reader
 
+import Data.Function (fix)
 import Data.Var.ST
 
 class Monad m => MonadST m where
@@ -99,25 +100,23 @@ instance MonadIO m => MonadIO (STT s m) where
 
 pushLabel :: MonadST m => STT s m ()
 pushLabel = STT $ do
-  Env labelVar trailVar <- ask
+  env <- ask
   liftST $ do
-    modifyVar' labelVar (+ 1)
-    modifyVar' trailVar Label
+    modifyLabel' env (+ 1)
+    modifyTrail' env Label
 
 popLabel :: MonadST m => STT s m ()
 popLabel = STT $ do
-  Env labelVar trailVar <- ask
+  env <- ask
   liftST $ do
-    modifyVar' labelVar $ subtract 1
-    writeVar trailVar =<< go =<< readVar trailVar
-  where
-    go :: Trail s w -> ST w (Trail s w)
-    go (Write labelVar var label a xs) = do
-      writeVar labelVar label
-      writeVar var a
-      go xs
-    go (Label xs) = return xs
-    go Nil = return Nil
+    modifyLabel' env $ subtract 1
+    readTrail env >>= fix (\ rec trail -> case trail of
+      Write labelVar var label a xs -> do
+        writeVar labelVar label
+        writeVar var a
+        rec xs
+      Label xs -> return xs
+      Nil -> return Nil) >>= writeTrail env
 
 runSTT :: MonadST m => (forall s . STT s m a) -> m a
 runSTT m = do
@@ -153,6 +152,15 @@ data Env s w =
 
 readLabel :: Env s w -> ST w (Label s)
 readLabel (Env labelVar _) = readVar labelVar
+
+modifyLabel' :: Env s w -> (Label s -> Label s) -> ST w ()
+modifyLabel' (Env labelVar _) = modifyVar' labelVar
+
+readTrail :: Env s w -> ST w (Trail s w)
+readTrail (Env _ trailVar) = readVar trailVar
+
+writeTrail :: Env s w -> Trail s w -> ST w ()
+writeTrail (Env _ trailVar) = writeVar trailVar
 
 modifyTrail' :: Env s w -> (Trail s w -> Trail s w) -> ST w ()
 modifyTrail' (Env _ trailVar) = modifyVar' trailVar

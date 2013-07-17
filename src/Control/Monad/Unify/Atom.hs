@@ -11,7 +11,7 @@ module Control.Monad.Unify.Atom
        , unify
        ) where
 
-import Control.Monad (MonadPlus, liftM, mzero)
+import Control.Monad (MonadPlus, liftM, mzero, when)
 import Control.Monad.Unify
 
 import Data.Function (fix)
@@ -20,15 +20,13 @@ data Term var a = Pure a | Wrap !(var (Term var a))
 
 instance Eq a => MonadUnify var (Term var a) where
   fresh = liftM Wrap freshVar
-  x `is` y = unify (\ _ _ -> mzero) x y
+  is = unify mzero
 
 atom :: a -> Term var a
 atom = Pure
 
-unify :: (Eq a, MonadVar var m) =>
-         (a -> a -> m ()) ->
-         Term var a -> Term var a -> m ()
-unify f t1 t2 = do
+unify :: (Eq a, MonadVar var m) => m () -> Term var a -> Term var a -> m ()
+unify m t1 t2 = do
   s1 <- semiprune t1
   s2 <- semiprune t2
   case (s1, s2) of
@@ -53,23 +51,19 @@ unify f t1 t2 = do
       writeVar var2 t1'
     (Atom a :* _, Atom b :* _) -> match a b
   where
-    match a b
-      | a == b = return ()
-      | otherwise = f a b
+    match a b = when (a /= b) m
 
 semiprune :: MonadVar var m =>
              Term var a -> m (Pair (SemiprunedTerm var a) (Term var a))
 semiprune t0 = case t0 of
   Pure a -> return $! Atom a :* t0
-  Wrap var0 -> fix (\ rec t var -> do
-    m <- readVar var
-    case m of
-      Nothing -> return $! UnwrittenVar var :* t
-      Just t'@(Wrap var') -> do
+  Wrap var0 -> fix (\ rec t var ->
+    readVar var >>= (return $! UnwrittenVar var :* t) `maybe` \ t' -> case t' of
+      Wrap var' -> do
         s@(_ :* t'') <- rec t' var'
         writeVar var t''
         return s
-      Just (Pure a) -> return $! WrittenVar var a :* t) t0 var0
+      Pure a -> return $! WrittenVar var a :* t) t0 var0
 
 data Pair a b = !a :* !b
 
